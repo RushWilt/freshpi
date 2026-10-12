@@ -1,0 +1,29 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+# Generate SSH host keys in a freshly written Raspberry Pi OS rootfs and mask the
+# first-boot regeneration unit, so the keys CM sees on the first connection are the
+# ones FreshPi published. Prints one "type key" line per public key on stdout.
+set -u
+
+ROOTFS=${1:?usage: freshpi-hostkeys <rootfs-mount>}
+KEYS="$ROOTFS/etc/ssh"
+SYSD="$ROOTFS/etc/systemd/system"
+
+[ "$ROOTFS" != "/" ] || { echo "freshpi-hostkeys: refusing to touch /" >&2; exit 1; }
+[ -d "$KEYS" ] || { echo "freshpi-hostkeys: $KEYS not found" >&2; exit 1; }
+
+# The rootfs is fresh from the image, so no host keys should exist; make it deterministic
+# if the image ships any.
+rm -f "$KEYS"/ssh_host_*_key "$KEYS"/ssh_host_*_key.pub
+
+ssh-keygen -q -t ed25519 -N '' -f "$KEYS/ssh_host_ed25519_key" || exit 1
+ssh-keygen -q -t ecdsa -N '' -f "$KEYS/ssh_host_ecdsa_key" || exit 1
+ssh-keygen -q -t rsa -b 3072 -N '' -f "$KEYS/ssh_host_rsa_key" || exit 1
+
+# cloud-init runs regenerate_ssh_host_keys.service on first boot unless it is masked.
+mkdir -p "$SYSD"
+ln -sf /dev/null "$SYSD/regenerate_ssh_host_keys.service"
+
+for f in "$KEYS"/ssh_host_*_key.pub; do
+    awk 'NF >= 2 {print $1, $2}' "$f"
+done

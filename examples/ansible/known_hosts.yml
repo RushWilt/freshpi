@@ -1,0 +1,23 @@
+# Pin the SSH host keys FreshPi generated during the last blat, before first contact.
+# Run from the controller, against the inventory:
+#   FRESHPI_ADMIN=admin@freshpi.example.net \
+#     ansible-playbook -i examples/ansible/inventory.sh examples/ansible/known_hosts.yml
+# After this, plain `ansible -i ... -m ping` works with no accept-new / -R juggling.
+# Re-run after every re-blat (a re-blat always generates new host keys).
+- hosts: all
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Pin the host keys published by the last blat
+      ansible.builtin.known_hosts:
+        name: "{{ ansible_host }}"
+        key: "{{ ansible_host }} {{ openssh_types[item.0] }} {{ item.1 }}"
+        state: present
+      loop: "{{ freshpi_blat_host_keys.items() | default([]) }}"
+      vars:
+        # The inventory stores the keys by short name; the known_hosts module
+        # needs the OpenSSH wire type.
+        openssh_types:
+          ecdsa: ecdsa-sha2-nistp256
+          ed25519: ssh-ed25519
+          rsa: ssh-rsa

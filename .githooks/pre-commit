@@ -1,0 +1,112 @@
+#!/bin/sh
+# Refuses a commit whose staged changes add:
+# - a secret (private key, API token, password, ...), found with gitleaks' default rules
+#   (https://github.com/gitleaks/gitleaks);
+# - a site value listed in .git/info/site-values: one extended regular expression per line,
+#   matched case-insensitively against added lines and new file names. That file lives in
+#   .git/, so the values themselves are never committed. Without it, this check is skipped.
+#
+# Activate once per clone:  git config core.hooksPath .githooks
+# Skip it for one commit:   git commit --no-verify   (only after reading the findings)
+#
+# gitleaks runs from PATH if installed, otherwise from the pinned image with docker. If neither
+# is available, or the scan reports an error, the commit is refused rather than let through
+# unscanned.
+set -eu
+
+image=zricethezav/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+run_gitleaks() {
+    set -- git --pre-commit --staged --redact --verbose --no-banner --no-color .
+    if command -v gitleaks >/dev/null 2>&1; then
+        gitleaks "$@"
+    elif command -v docker >/dev/null 2>&1; then
+        # The work tree, git dir and index are mounted read-only at their own paths and
+        # GIT_INDEX_FILE is passed in, so the scan sees exactly what is being committed:
+        # "git commit -a" and "git commit <path>" stage into a temporary index, and a linked
+        # worktree's git dir lies outside the work tree. git reads an index it can't see as
+        # empty, so a missing mount would pass the commit unscanned.
+        top=$(git rev-parse --show-toplevel)
+        gitdir=$(git rev-parse --path-format=absolute --git-common-dir)
+        indexdir=$(dirname "$(git rev-parse --path-format=absolute --git-path index)")
+        case $indexdir/ in "$top"/* | "$gitdir"/*) indexdir= ;; esac
+        [ -d "$indexdir" ] || indexdir=
+        docker run --rm --network none --user "$(id -u):$(id -g)" \
+            -v "$top:$top:ro" -v "$gitdir:$gitdir:ro" \
+            ${indexdir:+-v "$indexdir:$indexdir:ro"} -w "$top" -e GIT_INDEX_FILE \
+            "$image" "$@"
+    else
+        echo "pre-commit: found neither gitleaks nor docker to scan for secrets." >&2
+        return 1
+    fi
+}
+
+check_secrets() {
+    # gitleaks logs a failed git call as ERR but still exits 0 with "no leaks found", so its
+    # log is checked as well as its exit status.
+    status=0
+    run_gitleaks 2>"$work/gitleaks.log" || status=$?
+    cat "$work/gitleaks.log" >&2
+    if [ "$status" -ne 0 ] || grep -q '^[^ ]* ERR ' "$work/gitleaks.log"; then
+        echo "pre-commit: the secret scan found secrets or did not run (see above)." >&2
+        return 1
+    fi
+}
+
+check_site_values() {
+    list=$(git rev-parse --git-path info/site-values)
+    if [ ! -f "$list" ]; then
+        echo "pre-commit: no $list, so site values were not checked." >&2
+        return 0
+    fi
+    grep -v -e '^[[:space:]]*#' -e '^[[:space:]]*$' "$list" >"$work/patterns" || true
+    if ! git -c core.quotePath=false diff --cached -U0 --no-color --no-ext-diff --no-relative \
+            --src-prefix=a/ --dst-prefix=b/ --diff-filter=ACMR >"$work/diff" ||
+        ! git -c core.quotePath=false diff --cached --name-only --diff-filter=ACR >"$work/names"
+    then
+        echo "pre-commit: could not list the staged changes to check for site values." >&2
+        return 1
+    fi
+    # Each added line goes to "added"; the same line of "where" holds its path:line.
+    awk -v where="$work/where" '
+        /^diff --git / { header = 1; next }
+        # git ends the "+++" line with a tab when the path contains a space
+        header && /^\+\+\+ / { path = substr($0, 7); sub(/\t$/, "", path); next }
+        header && !/^@@/ { next }
+        /^@@/ { header = 0; split($3, start, ","); line = substr(start[1], 2) + 0; next }
+        /^\+/ { print path ":" line > where; print substr($0, 2); line++ }
+    ' "$work/diff" >"$work/added"
+    : >"$work/found"
+    while IFS= read -r pattern; do
+        status=0
+        grep -E -e "$pattern" /dev/null 2>/dev/null || status=$?
+        if [ "$status" -eq 2 ]; then
+            echo "  invalid pattern in $list: $pattern" >>"$work/found"
+            continue
+        fi
+        grep -n -i -E -e "$pattern" "$work/added" | cut -d: -f1 >"$work/hits" || true
+        if [ -s "$work/hits" ]; then
+            PATTERN=$pattern awk 'NR == FNR { hit[$1]; next }
+                FNR in hit { print "  " $0 ": " ENVIRON["PATTERN"] }' \
+                "$work/hits" "$work/where" >>"$work/found"
+        fi
+        grep -i -E -e "$pattern" "$work/names" |
+            PATTERN=$pattern awk '{ print "  " $0 " (file name): " ENVIRON["PATTERN"] }' \
+                >>"$work/found" || true
+    done <"$work/patterns"
+    if [ -s "$work/found" ]; then
+        echo "pre-commit: staged changes add site values listed in $list:" >&2
+        cat "$work/found" >&2
+        return 1
+    fi
+}
+
+ok=true
+check_secrets || ok=false
+check_site_values || ok=false
+if [ "$ok" = false ]; then
+    echo "pre-commit: commit refused." >&2
+    exit 1
+fi

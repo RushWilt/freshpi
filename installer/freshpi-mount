@@ -1,0 +1,13 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+# Mount every partition on NVMe, USB and SD read-only under /mnt/<name>.
+for dev in /dev/nvme*n*p* /dev/sd*[0-9] /dev/mmcblk*p*; do
+    [ -b "$dev" ] || continue
+    dir=/mnt/${dev#/dev/}
+    mkdir -p "$dir"
+    if mount -o ro "$dev" "$dir" 2>/dev/null; then
+        echo "$dev -> $dir"
+    else
+        rmdir "$dir"
+    fi
+done

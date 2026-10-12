@@ -1,0 +1,213 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+# freshpi installer menu: boot local disk, rescue shell, or blat the latest image.
+# Runs on tty1 with HDMI + keyboard. Talks to the freshpi server over HTTP.
+set -u
+
+# FRESHPI_SERVER/FRESHPI_SERIAL/FRESHPI_DEVMODEL override the kernel-provided values (off-device testing).
+SERVER=${FRESHPI_SERVER:-$(sed -n 's/.*freshpi\.server=\([^ ]*\).*/\1/p' /proc/cmdline)}
+SERIAL=${FRESHPI_SERIAL:-$(tr -d '\0' < /proc/device-tree/serial-number | tail -c 8 | tr 'A-F' 'a-f')}
+DEVMODEL=${FRESHPI_DEVMODEL:-$(tr -d '\0' < /proc/device-tree/model)}
+STATE=/tmp/state.json
+
+say() { printf '%s\n' "$*"; }
+post() { curl -sf -m 10 -X POST --data-binary "$2" "$SERVER/pi/$SERIAL/$1" >/dev/null; }
+log() { say "$*"; post log "$*" || true; }
+# Never returns: nothing after a reboot request may run (e.g. a 'done' after a failure).
+reboot_now() { sync; say "Rebooting..."; sleep 2; reboot -f; sleep 30; exit 1; }
+
+net_up() {
+    [ -e /run/net-up ] && return 0
+    ip link set lo up
+    i=0
+    while ! ip link show eth0 >/dev/null 2>&1; do
+        i=$((i + 1)); [ $i -gt 30 ] && { say "eth0 never appeared"; return 1; }
+        sleep 1
+    done
+    ip link set eth0 up
+    udhcpc -i eth0 -q -n -t 10 -s /usr/share/udhcpc/freshpi.script || return 1
+    touch /run/net-up
+}
+
+fetch_state() {
+    curl -sf -m 10 "$SERVER/pi/$SERIAL/state" -o "$STATE.new" && mv "$STATE.new" "$STATE"
+}
+st() { jq -r "$1" "$STATE"; }
+
+model_matches() {
+    case "$(st .model)" in
+        pi5) case "$DEVMODEL" in "Raspberry Pi 5"*) return 0 ;; esac ;;
+        pi3) case "$DEVMODEL" in "Raspberry Pi 3"*) return 0 ;; esac ;;
+    esac
+    return 1
+}
+
+part1() {
+    case "$1" in *[0-9]) echo "${1}p1" ;; *) echo "${1}1" ;; esac
+}
+
+part2() {
+    case "$1" in *[0-9]) echo "${1}p2" ;; *) echo "${1}2" ;; esac
+}
+
+# URL-encode stdin (jq @uri): base64 keys contain + / = which form decoding would mangle.
+urlenc() { jq -rsR '@uri'; }
+
+fail_blat() {
+    say ""
+    log "BLAT FAILED: $*"
+    post fail "$*" || true
+    say "The server now defaults this Pi to rescue. Rebooting in 20s."
+    sleep 20
+    reboot_now
+}
+
+blat() {
+    # Re-check with the server immediately before touching the disk.
+    fetch_state || fail_blat "server unreachable at re-check"
+    [ "$(st .armed)" = true ] || { log "Disarmed on the server - not writing."; return 1; }
+    [ "$1" = manual ] || [ "$(st .action)" = blat ] || { log "Server action is no longer blat - not writing."; return 1; }
+    model_matches || fail_blat "registered model $(st .model) but this board is '$DEVMODEL'"
+    target=$(st .target)
+    [ -b "$target" ] || fail_blat "target $target not present"
+    [ "$(st .image)" != null ] || fail_blat "server has no image"
+    url="$SERVER$(st .image.path)"; want=$(st .image.img_sha256); size=$(st .image.img_size); name=$(st .image.name)
+
+    log "Writing $name to $target ($size bytes)"
+    rm -f /tmp/h /tmp/hash; mkfifo /tmp/h
+    sha256sum < /tmp/h > /tmp/hash &
+    hasher=$!
+    set -o pipefail
+    if ! curl -sf "$url" | xz -dc | tee /tmp/h | dd of="$target" bs=4M conv=fsync 2>/tmp/dd.err; then
+        set +o pipefail; wait $hasher
+        fail_blat "write failed: $(tail -n 1 /tmp/dd.err)"
+    fi
+    set +o pipefail
+    wait $hasher
+    got=$(cut -d' ' -f1 /tmp/hash)
+    [ "$got" = "$want" ] || fail_blat "stream sha256 $got != $want"
+
+    log "Verifying what is on $target"
+    sync; blockdev --flushbufs "$target"; echo 3 > /proc/sys/vm/drop_caches
+    back=$(head -c "$size" "$target" | sha256sum | cut -d' ' -f1)
+    [ "$back" = "$want" ] || fail_blat "read-back sha256 $back != $want"
+
+    log "Writing first-boot seed"
+    blockdev --rereadpt "$target"; sleep 2
+    p1=$(part1 "$target")
+    mkdir -p /mnt/boot
+    mount -t vfat "$p1" /mnt/boot || fail_blat "cannot mount $p1"
+    curl -sf "$SERVER/pi/$SERIAL/seed/user-data" -o /mnt/boot/user-data &&
+        curl -sf "$SERVER/pi/$SERIAL/seed/meta-data" -o /mnt/boot/meta-data &&
+        touch /mnt/boot/ssh || { umount /mnt/boot; fail_blat "seed download failed"; }
+    umount /mnt/boot
+    sync
+
+    log "Generating SSH host keys in the new rootfs"
+    mkdir -p /mnt/root
+    p2=$(part2 "$target")
+    mount -t ext4 "$p2" /mnt/root || fail_blat "cannot mount rootfs $p2"
+    if ! hk=$(freshpi-hostkeys /mnt/root); then
+        umount /mnt/root
+        fail_blat "SSH host key generation failed"
+    fi
+    umount /mnt/root
+    body=$(printf 'image=%s&host=%s' "$name" "$(st .hostname)")
+    while read -r type key; do
+        [ -n "$type" ] || continue
+        case "$type" in
+            ssh-ed25519) kname=ed25519 ;;
+            ecdsa-*) kname=ecdsa ;;
+            ssh-rsa) kname=rsa ;;
+            *) kname=other ;;
+        esac
+        body="$body&pub_key_$kname=$(printf '%s' "$key" | urlenc)"
+    done <<EOF
+$hk
+EOF
+    post done "$body" || fail_blat "server did not accept 'done'"
+    log "Done: $name on $target, hostname $(st .hostname). Booting it."
+    reboot_now
+}
+
+rescue() {
+    if [ ! -e /run/dropbear.pid ]; then
+        mkdir -p /etc/dropbear
+        dropbear -R -s -P /run/dropbear.pid
+    fi
+    log "Rescue shell started"
+    say ""
+    say "Rescue: ssh root@$(ip -4 -o addr show eth0 | awk '{print $4}' | cut -d/ -f1)"
+    say "  freshpi-mount     mount every partition read-only under /mnt"
+    say "  exit            back to the menu"
+    say ""
+    sh -l
+}
+
+banner() {
+    clear
+    say "freshpi installer  -  $DEVMODEL"
+    say "serial $SERIAL   host $(st .hostname)   target $(st .target)"
+    say "image  $(st '.image.name // "none"')"
+    say ""
+    say "  1) Boot local disk (disarm)"
+    say "  2) Rescue shell"
+    say "  3) Blat $(st '.image.name // "(no image)"') onto $(st .target)"
+    say ""
+}
+
+run_choice() {
+    case "$1" in
+        1) post disarm "" || log "server refused disarm (already disarmed?)"; reboot_now ;;
+        2) rescue ;;
+        3) blat "$2" ;;
+    esac
+}
+
+# ---------------------------------------------------------------- main
+
+while ! net_up; do say "Network not up, retrying in 5s"; sleep 5; done
+while ! fetch_state; do say "Cannot reach $SERVER, retrying in 5s"; sleep 5; done
+timer=on
+
+while true; do
+    fetch_state || { say "Cannot reach $SERVER"; sleep 5; continue; }
+    if [ "$(st .armed)" != true ]; then
+        say "This Pi is not armed on the server - booting local disk."
+        reboot_now
+    fi
+    banner
+    action=$(st .action); countdown=$(st .countdown)
+    case "$action" in local) def=1 ;; rescue) def=2 ;; blat) def=3 ;; *) def= ;; esac
+
+    if [ -n "$def" ] && [ "$timer" = on ]; then
+        left=$countdown
+        while [ "$left" -gt 0 ]; do
+            printf '\rDefault: %s in %3ss  -  press any key to stop the countdown ' "$action" "$left"
+            if read -r -s -n 1 -t 1 _key; then timer=off; break; fi
+            left=$((left - 1))
+        done
+        say ""
+        if [ "$timer" = on ]; then
+            run_choice "$def" auto
+            continue
+        fi
+        log "Countdown stopped by keypress"
+    fi
+
+    printf 'Choose 1, 2 or 3: '
+    read -r -n 1 choice; say ""
+    case "$choice" in
+        3)
+            # Older servers send no confirm_blat: keep asking.
+            if [ "$(st .confirm_blat)" = false ]; then
+                run_choice 3 manual
+            else
+                printf 'This erases %s. Type yes to continue: ' "$(st .target)"
+                read -r confirm
+                [ "$confirm" = yes ] && run_choice 3 manual
+            fi
+            ;;
+        1|2) run_choice "$choice" ;;
+    esac
+done

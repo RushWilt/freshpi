@@ -1,0 +1,25 @@
+# /etc/freshpi/freshpi.conf - KEY=VALUE, read by the freshpi service and CLI.
+# Environment variables of the same name override these values.
+
+# Account created on every provisioned Pi for configuration management (SSH key only,
+# password locked, passwordless sudo). Every key in FRESHPI_KEYS_FILE can log in as it: put
+# the CM key there, plus any people's keys you want as break-glass access.
+#FRESHPI_USER=cm
+
+# Optional, defaults shown.
+#FRESHPI_PORT=8090
+# Address the HTTP service listens on: 0.0.0.0 (all IPv4), :: (all IPv6, usually IPv4 too),
+# one interface's address (e.g. 192.0.2.10), or 127.0.0.1 (local only; Pis cannot reach it).
+#FRESHPI_BIND=0.0.0.0
+#FRESHPI_TFTP_ROOT=/srv/tftp
+#FRESHPI_STATE_DIR=/var/lib/freshpi
+#FRESHPI_KEYS_FILE=/etc/freshpi/authorized_keys
+# What the installer menu does when its countdown runs out, unless 'freshpi arm' is given
+# --action/--countdown: local (1, boot local disk and disarm), rescue (2, rescue shell),
+# blat (3, write the image), or menu (no default, wait for a choice).
+#FRESHPI_DEFAULT_ACTION=menu
+# Countdown in whole seconds (0 = run the default immediately).
+#FRESHPI_COUNTDOWN=30
+# Choosing 3 (blat) by hand asks to type "yes" first; "no" makes the keypress enough.
+# Read by the service: restart freshpi.service after changing it.
+#FRESHPI_CONFIRM_BLAT=yes

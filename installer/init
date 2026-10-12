@@ -1,0 +1,21 @@
+#!/bin/busybox sh
+# SPDX-License-Identifier: Apache-2.0
+# freshpi installer init (PID 1 inside the network-booted initramfs).
+/bin/busybox mkdir -p /proc /sys /dev /tmp /run /mnt /usr/bin /usr/sbin /sbin
+/bin/busybox --install -s
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+mkdir -p /dev/pts && mount -t devpts devpts /dev/pts
+echo 1 > /proc/sys/kernel/printk 2>/dev/null
+
+# The menu's terminal is the last console= on the kernel cmdline (tty1 on the Pi).
+# Alpine busybox has no cttyhack: as session leader, opening the tty makes it the controlling tty.
+TTY=$(sed 's/.* //' /sys/class/tty/console/active)
+TTY=${TTY:-tty1}
+
+# Respawn the menu forever; it only exits by rebooting.
+while true; do
+    setsid sh -c "exec /sbin/freshpi-menu <>/dev/$TTY >&0 2>&1"
+    sleep 1
+done

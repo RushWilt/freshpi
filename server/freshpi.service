@@ -1,0 +1,17 @@
+[Unit]
+Description=freshpi Raspberry Pi network provisioning server
+After=network-online.target tftpd-hpa.service
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/python3 /opt/freshpi/freshpi.py serve
+Restart=on-failure
+# Root only to create/remove serial folders in the root-owned TFTP root.
+ProtectSystem=strict
+ReadWritePaths=/var/lib/freshpi /srv/tftp
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
