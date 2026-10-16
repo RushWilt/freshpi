@@ -10,7 +10,7 @@ mkdir -p /dev/pts && mount -t devpts devpts /dev/pts
 echo 1 > /proc/sys/kernel/printk 2>/dev/null
 
 # The menu's terminal is the last console= on the kernel cmdline (tty1 on the Pi).
-# Alpine busybox has no cttyhack: as session leader, opening the tty makes it the controlling tty.
+# No cttyhack needed: as session leader, opening the tty makes it the controlling tty.
 TTY=$(sed 's/.* //' /sys/class/tty/console/active)
 TTY=${TTY:-tty1}
 

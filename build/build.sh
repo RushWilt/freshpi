@@ -1,12 +1,16 @@
 #!/bin/sh
 # SPDX-License-Identifier: Apache-2.0
-# Build the network-boot payload (kernels, firmware, dtbs, installer initramfs)
-# on an x86_64 workstation. Needs docker and sudo (to loop-mount the Pi OS image).
+# Build the network-boot payload (kernels, firmware, dtbs, installer initramfs) on any
+# Debian-family machine, any architecture. Needs apt, dpkg, readelf (binutils), python3,
+# cpio, debian-archive-keyring and sudo (to loop-mount the Pi OS image).
 #
 #   build/build.sh <raspios-lite-arm64.img.xz | latest> <authorized_keys> <server-url>
 #
 #   Use "latest" to download the current Pi OS Lite arm64 image (cached in build/cache/,
 #   checksum-verified and idempotent), or give a local .img.xz path to build from a specific image.
+#
+#   The installer userland comes from Debian arm64 packages (build/debian-userland.py);
+#   DEBIAN_SUITE, DEBIAN_MIRROR and DEBIAN_SECURITY_MIRROR pick where from, e.g. a local mirror.
 #
 # Output: build/out/payload/ - copied to the server by deploy.sh.
 set -eu
@@ -15,8 +19,6 @@ set -eu
 IMG_XZ=$1
 KEYS=$2
 SERVER_URL=$3
-ALPINE=${ALPINE:-3.24}
-PACKAGES="busybox busybox-binsh musl curl xz jq e2fsprogs dosfstools sfdisk nvme-cli smartmontools dropbear openssh-keygen"
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(dirname "$HERE")
@@ -35,16 +37,8 @@ fi
 [ -f "$IMG_XZ" ] || { echo "image not found: $IMG_XZ" >&2; exit 1; }
 echo "== building from $IMG_XZ"
 
-echo "== installer userland (Alpine $ALPINE aarch64, no emulation needed)"
-docker run --rm -v "$ROOTFS:/out" "alpine:$ALPINE" sh -ec "
-    trap 'chown -R $(id -u):$(id -g) /out' EXIT
-    apk add --quiet --no-cache alpine-keys
-    mkdir -p /out/etc/apk/keys && cp /usr/share/apk/keys/aarch64/* /out/etc/apk/keys/
-    apk add --quiet --arch aarch64 --root /out --initdb --no-scripts --no-cache \
-        -X https://dl-cdn.alpinelinux.org/alpine/v$ALPINE/main \
-        -X https://dl-cdn.alpinelinux.org/alpine/v$ALPINE/community \
-        $PACKAGES
-    rm -rf /out/etc/apk /out/lib/apk /out/var/cache"
+echo "== installer userland (Debian ${DEBIAN_SUITE:-trixie} arm64, no emulation needed)"
+python3 "$HERE/debian-userland.py" "$ROOTFS" > "$PAYLOAD/SOURCE_PACKAGES"
 
 install -m 0755 "$REPO/installer/init" "$ROOTFS/init"
 install -D -m 0755 "$REPO/installer/freshpi-menu" "$ROOTFS/sbin/freshpi-menu"
@@ -56,6 +50,7 @@ chmod 0700 "$ROOTFS/root" "$ROOTFS/root/.ssh"
 printf 'export PS1="freshpi-rescue:\\w# "\nexport PATH=/usr/sbin:/usr/bin:/sbin:/bin\n' > "$ROOTFS/root/.profile"
 # Minimal passwd/group: ssh-keygen fails with "No user exists for uid 0" without a passwd
 # entry, and dropbear uses it to find root's home (and thus authorized_keys).
+mkdir -p "$ROOTFS/etc"
 printf 'root:x:0:0:root:/root:/bin/sh\n' > "$ROOTFS/etc/passwd"
 printf 'root:x:0:\n' > "$ROOTFS/etc/group"
 chmod 0644 "$ROOTFS/etc/passwd" "$ROOTFS/etc/group"

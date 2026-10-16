@@ -73,9 +73,11 @@ flowchart TD
 - **DHCP**: must tell the Pis the server's IP address as their TFTP server. In the tested setup
   it arrived as DHCP option 66; next-server alone is untested. For a Pi 5 you can instead set
   `TFTP_IP` in its EEPROM. See [Network](#network).
-- **Build machine**: x86_64 Linux with docker and sudo (to loop-mount the Pi OS image). The
-  installer userland is Alpine aarch64 installed with `apk --arch aarch64 --no-scripts`, so no
-  emulation is needed.
+- **Build machine**: any Debian-family Linux, any architecture, with apt, dpkg, readelf
+  (binutils), python3, cpio, `debian-archive-keyring` and sudo (to loop-mount the Pi OS image).
+  The installer userland is Debian arm64 packages, downloaded with apt and unpacked with
+  `dpkg-deb` (no package installed, no package script run), so no emulation or container is
+  needed. `DEBIAN_MIRROR`/`DEBIAN_SECURITY_MIRROR` can point the build at a local mirror.
 - **Pis**: wired Ethernet on the same network as the server.
 - **Controller** (only for configuration management): a machine that can SSH to the FreshPi
   server and reach the Pis; see
@@ -344,7 +346,7 @@ fail.
 
 ## Development
 
-Python is used for the server and the image fetch helper; both are standard library only, so
+Python is used for the server and the build helpers; all are standard library only, so
 there is no dependency to install. The tooling runs through uv (`uvx pytest`, `uvx ruff check`)
 — install uv once with `curl -LsSf https://astral.sh/uv/install.sh | sh`. `ruff` keeps the
 Python files clean; `pyproject.toml` pins minimum Python 3.9 and the ruff and pytest settings.
