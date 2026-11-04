@@ -458,6 +458,25 @@ def test_ready_recorded_once_per_blat(server):
     assert srv.request(f"/pi/{SERIAL}/ready", PHONE_HOME)[0] == 200
 
 
+def test_list_shows_reported_address_until_next_blat(server):
+    srv = server()
+
+    def address_column():
+        header, row = cli(srv.env, "list", SERIAL).stdout.splitlines()[:2]
+        start = header.index("address")
+        return row[start:header.index("target")].strip()
+
+    assert address_column() == "-"
+    cli(srv.env, "arm", SERIAL)
+    srv.request(f"/pi/{SERIAL}/done", b"image=x")
+    srv.request(f"/pi/{SERIAL}/ready", PHONE_HOME)
+    assert address_column() == "127.0.0.1"
+    # A new blat drops the old address until the Pi reports again.
+    cli(srv.env, "arm", SERIAL)
+    srv.request(f"/pi/{SERIAL}/done", b"image=y")
+    assert address_column() == "-"
+
+
 def test_ready_refused_for_blat_that_expects_no_report(server):
     # A blat finished before the seed had phone_home never reports in. A ready posted for it
     # can only come from something else on the network, so it must not be recorded.

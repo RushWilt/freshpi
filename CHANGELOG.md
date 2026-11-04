@@ -4,7 +4,12 @@ All notable changes to FreshPi are documented in this file. The format is based 
 [Keep a Changelog](https://keepachangelog.com/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.0.2] - 2026-11-04
+
+### Added
+
+- `freshpi list` has an `address` column: the address each Pi reported at its first boot after
+  its last blat, `-` until then.
 
 ### Changed
 

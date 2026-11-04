@@ -579,7 +579,8 @@ def cmd_list(args) -> None:
     with locked_state(write=False) as state:
         pis = state["pis"]
         serials = resolve_targets(state, args.targets) if args.targets else sorted(pis)
-    print(f"{'serial':8}  {'hostname':14}  {'target':14}  {'armed':5}  "
+    # address: what the Pi reported at its first boot after the last blat ("-" until then).
+    print(f"{'serial':8}  {'hostname':14}  {'address':15}  {'target':14}  {'armed':5}  "
           f"{'action':6}  {'cd':>3}  last event")
     for serial in serials:
         pi = pis[serial]
@@ -587,8 +588,8 @@ def cmd_list(args) -> None:
         armed = "yes" if pi["armed"] else "no"
         if folder != pi["armed"]:
             armed += "!"  # state and TFTP folder disagree
-        print(f"{serial:8}  {hostname_for(serial, pi):14}  {pi['target']:14}  "
-              f"{armed:5}  {pi['action']:6}  {pi['countdown']:>3}  "
+        print(f"{serial:8}  {hostname_for(serial, pi):14}  {pi.get('address') or '-':15}  "
+              f"{pi['target']:14}  {armed:5}  {pi['action']:6}  {pi['countdown']:>3}  "
               f"{pi['updated']} {pi['last_event']}")
     bad = check_tftp_root()
     if bad:

@@ -42,7 +42,8 @@ them.
   so cloud-init runs again on the new disk. An empty `ssh` file enables sshd.
 - **Ready**: at the end of the new OS's first boot, cloud-init's `phone_home` posts to the
   server (`/pi/<serial>/ready`). The server records when, the address the Pi now has, and its
-  SSH host public keys (`freshpi log` shows it; `last event` in `freshpi list` reads
+  SSH host public keys (`freshpi log` shows it; `freshpi list` shows the address in its
+  `address` column, `-` until the first boot after each blat, and `last event` reads
   `first boot done at <address>`). Accepted once, and only after a blat this server recorded as
   done. The host keys are for information: anything on the network could post them first, so
   don't use them to trust the Pi. The post goes to the server URL the installer was built with, so
