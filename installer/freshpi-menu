@@ -92,6 +92,14 @@ blat() {
     back=$(head -c "$size" "$target" | sha256sum | cut -d' ' -f1)
     [ "$back" = "$want" ] || fail_blat "read-back sha256 $back != $want"
 
+    root_mib=$(st '.root_mib // empty')
+    if [ -n "$root_mib" ]; then
+        log "Splitting $target: root $root_mib MiB, the rest a data partition"
+        out=$(freshpi-split "$target" "$root_mib" 2>/tmp/split.err) ||
+            fail_blat "split failed: $(tail -n 1 /tmp/split.err)"
+        log "$out"
+    fi
+
     log "Writing first-boot seed"
     blockdev --rereadpt "$target"; sleep 2
     p1=$(part1 "$target")

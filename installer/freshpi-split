@@ -1,0 +1,77 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+# Split a disk freshly written with Raspberry Pi OS: the root partition (2) and its filesystem
+# grown to ROOT_MIB, and the rest of the disk a third partition, left unformatted for a data
+# volume (e.g. LUKS). It does what Pi OS's first-boot resize would have done otherwise
+# ("resize" on cmdline.txt grows partition 2 to the end of the disk, and so would swallow
+# partition 3, then gives the disk a new id): a random disk id, and "resize" dropped.
+#
+# Partition 3 is not wiped: if the previous install split the disk the same way, it still holds
+# that volume, as a separate data disk would.
+set -u
+
+TARGET=${1:?usage: freshpi-split <disk> <root size in MiB>}
+ROOT_MIB=${2:?usage: freshpi-split <disk> <root size in MiB>}
+
+die() { echo "freshpi-split: $*" >&2; exit 1; }
+
+case "$TARGET" in *[0-9]) P=p ;; *) P= ;; esac
+p1="$TARGET${P}1"; p2="$TARGET${P}2"; p3="$TARGET${P}3"
+case "$ROOT_MIB" in '' | *[!0-9]*) die "root size must be a number of MiB, got '$ROOT_MIB'" ;; esac
+[ -b "$TARGET" ] || die "$TARGET is not a block device"
+
+# The table as the image wrote it: MBR, partitions 1 (boot) and 2 (root), nothing else.
+table=$(sfdisk -d "$TARGET") || die "cannot read the partition table of $TARGET"
+printf '%s\n' "$table" | grep -q '^label: dos$' || die "$TARGET has no MBR (dos) partition table"
+[ "$(printf '%s\n' "$table" | grep -c 'start=')" -eq 2 ] ||
+    die "$TARGET does not hold exactly the image's two partitions"
+root=$(printf '%s\n' "$table" | grep "^$p2 :") || die "$p2 is not in the partition table"
+start=$(printf '%s\n' "$root" | sed -n 's/.*start= *\([0-9]*\).*/\1/p')
+size=$(printf '%s\n' "$root" | sed -n 's/.*size= *\([0-9]*\).*/\1/p')
+
+# In 512-byte sectors. MBR addresses 2^32 sectors (2 TiB).
+disk=$(($(blockdev --getsize64 "$TARGET") / 512))
+want=$((ROOT_MIB * 2048))
+data=$((start + want))
+[ "$want" -ge "$size" ] || die "root size ${ROOT_MIB} MiB is smaller than the image's root partition"
+[ "$disk" -le 4294967296 ] || die "$TARGET is larger than an MBR partition table can address (2 TiB)"
+[ $((disk - data)) -ge 2097152 ] ||
+    die "$TARGET ($((disk / 2048)) MiB) leaves under 1 GiB after a ${ROOT_MIB} MiB root"
+
+old_id=$(sfdisk --disk-id "$TARGET" | sed 's/^0x//') || die "cannot read the disk id"
+new_id=$(od -An -N4 -tx4 /dev/urandom | tr -d ' \n')
+[ ${#new_id} -eq 8 ] && [ "$new_id" != 00000000 ] && [ "$new_id" != "$old_id" ] ||
+    die "could not draw a new disk id"
+
+echo ", $want" | sfdisk -q --no-reread --no-tell-kernel -N 2 "$TARGET" ||
+    die "cannot grow $p2"
+echo "$data, , 83" | sfdisk -q --no-reread --no-tell-kernel --append "$TARGET" ||
+    die "cannot create $p3"
+sfdisk -q --disk-id "$TARGET" "0x$new_id" || die "cannot set the disk id"
+blockdev --rereadpt "$TARGET" || die "the kernel did not re-read $TARGET"
+i=0
+until [ -b "$p3" ]; do
+    i=$((i + 1)); [ $i -gt 20 ] && die "$p3 never appeared"
+    sleep 0.5
+done
+
+# e2fsck exits 1 when it corrected something: fine before a resize.
+e2fsck -f -p "$p2" >&2; [ $? -le 1 ] || die "e2fsck found errors on $p2"
+resize2fs "$p2" >&2 || die "cannot grow the root filesystem on $p2"
+
+# The new id in root=PARTUUID= and /etc/fstab; no "resize" on the first boot.
+mkdir -p /mnt/split
+mount -t vfat "$p1" /mnt/split || die "cannot mount $p1"
+sed -i -e "s/$old_id-/$new_id-/g" -e 's/ resize$//' -e 's/ resize / /g' /mnt/split/cmdline.txt
+grep -q "root=PARTUUID=$new_id-02" /mnt/split/cmdline.txt && ! grep -qw 'resize' /mnt/split/cmdline.txt
+ok=$?
+umount /mnt/split
+[ $ok -eq 0 ] || die "cmdline.txt does not boot the new root partition"
+mount -t ext4 "$p2" /mnt/split || die "cannot mount $p2"
+sed -i "s/PARTUUID=$old_id-/PARTUUID=$new_id-/g" /mnt/split/etc/fstab
+grep -q "PARTUUID=$new_id-02" /mnt/split/etc/fstab
+ok=$?
+umount /mnt/split
+[ $ok -eq 0 ] || die "/etc/fstab does not mount the new root partition"
+sync
+echo "root $p2 ${ROOT_MIB} MiB, data $p3 $(((disk - data) / 2048)) MiB, disk id $new_id"

@@ -89,6 +89,10 @@ BOOLEANS = {"yes": True, "true": True, "on": True, "1": True,
 # instead of falling through to local disk.
 FORBIDDEN_ROOT_FILES = ("config.txt", "start.elf", "kernel8.img", "kernel_2712.img")
 
+# The smallest root partition a split disk may get (add --root-size): the image's own root
+# partition is about 2.4 GiB, and Pi OS needs room to update.
+MIN_ROOT_MIB = 4096
+
 
 def now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -327,6 +331,8 @@ class Handler(BaseHTTPRequestHandler):
             "confirm_blat": BOOLEANS[CONFIRM_BLAT],
             "model": pi["model"],
             "target": pi["target"],
+            # Split the target at blat: root partition this size, the rest a data partition.
+            "root_mib": pi.get("root_mib"),
             "hostname": hostname_for(serial, pi),
             "image": None if image is None else {
                 "path": f"/images/{image['file']}",
@@ -452,10 +458,12 @@ def cmd_add(args) -> None:
     serial = valid_serial(args.serial)
     with locked_state() as state:
         state["pis"][serial] = {
-            "model": args.model, "target": args.target, "armed": False,
-            "action": "menu", "countdown": 0, "updated": now(), "last_event": "added",
+            "model": args.model, "target": args.target, "root_mib": args.root_size,
+            "armed": False, "action": "menu", "countdown": 0, "updated": now(),
+            "last_event": "added",
         }
-    print(f"added {serial} ({args.model}, target {args.target}) as "
+    split = f", root {args.root_size} MiB + data" if args.root_size else ""
+    print(f"added {serial} ({args.model}, target {args.target}{split}) as "
           f"{hostname_for(serial, state['pis'][serial])}")
 
 
@@ -472,6 +480,16 @@ def countdown_seconds(value: str) -> int:
     if not re.fullmatch(r"[0-9]+", value.strip()):
         raise argparse.ArgumentTypeError(f"must be whole seconds (0 or more), got {value!r}")
     return int(value)
+
+
+def root_size_mib(value: str) -> int:
+    m = re.fullmatch(r"([0-9]+)([MG])(iB)?", value.strip(), re.IGNORECASE)
+    if not m:
+        raise argparse.ArgumentTypeError(f"must be a size such as 16G or 8192M, got {value!r}")
+    mib = int(m.group(1)) * (1024 if m.group(2).upper() == "G" else 1)
+    if mib < MIN_ROOT_MIB:
+        raise argparse.ArgumentTypeError(f"must be at least {MIN_ROOT_MIB // 1024}G, got {value!r}")
+    return mib
 
 
 def arm_defaults() -> tuple[str, int]:
@@ -580,16 +598,18 @@ def cmd_list(args) -> None:
         pis = state["pis"]
         serials = resolve_targets(state, args.targets) if args.targets else sorted(pis)
     # address: what the Pi reported at its first boot after the last blat ("-" until then).
-    print(f"{'serial':8}  {'hostname':14}  {'address':15}  {'target':14}  {'armed':5}  "
-          f"{'action':6}  {'cd':>3}  last event")
+    print(f"{'serial':8}  {'hostname':14}  {'address':15}  {'target':14}  {'root':6}  "
+          f"{'armed':5}  {'action':6}  {'cd':>3}  last event")
     for serial in serials:
         pi = pis[serial]
         folder = tftp_folder(serial).is_dir()
         armed = "yes" if pi["armed"] else "no"
         if folder != pi["armed"]:
             armed += "!"  # state and TFTP folder disagree
+        mib = pi.get("root_mib")
+        root = "-" if not mib else f"{mib // 1024}G" if mib % 1024 == 0 else f"{mib}M"
         print(f"{serial:8}  {hostname_for(serial, pi):14}  {pi.get('address') or '-':15}  "
-              f"{pi['target']:14}  {armed:5}  {pi['action']:6}  {pi['countdown']:>3}  "
+              f"{pi['target']:14}  {root:6}  {armed:5}  {pi['action']:6}  {pi['countdown']:>3}  "
               f"{pi['updated']} {pi['last_event']}")
     bad = check_tftp_root()
     if bad:
@@ -628,6 +648,7 @@ def cmd_inventory(args) -> None:
             "freshpi_serial": serial,
             "freshpi_model": pi["model"],
             "freshpi_target": pi["target"],
+            "freshpi_root_mib": pi.get("root_mib"),
             "freshpi_armed": bool(pi["armed"]),
             "freshpi_last_blat": pi.get("last_blat"),
             "freshpi_ready": pi.get("ready"),
@@ -713,6 +734,9 @@ def main() -> None:
     a.add_argument("serial")
     a.add_argument("--model", choices=sorted(MODELS), required=True)
     a.add_argument("--target", required=True, help="disk blat writes to, e.g. /dev/nvme0n1")
+    a.add_argument("--root-size", type=root_size_mib, metavar="SIZE",
+                   help="split the target at blat: Pi OS's root partition this size "
+                        "(e.g. 16G), the rest a third partition left for a data volume")
     a.set_defaults(fn=cmd_add)
     r = sub.add_parser("remove", help="unregister a Pi")
     r.add_argument("target", help=one_pi)

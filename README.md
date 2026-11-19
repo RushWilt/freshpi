@@ -32,9 +32,10 @@ them.
 - **Blat** writes only to the disk registered for that serial, and refuses if: the server no
   longer says "armed + blat" at the moment of writing, the board model differs from the
   registered one, or the target disk is missing. It checks the sha256 of the image while
-  writing and of a read-back of the disk, writes the first-boot seed, and only then tells the
-  server `done`, which disarms the Pi. Any failure leaves the Pi armed with rescue as the
-  default.
+  writing and of a read-back of the disk, splits the disk if the Pi was registered with
+  `--root-size` (see [A data partition beside the system](#a-data-partition-beside-the-system)),
+  writes the first-boot seed, and only then tells the server `done`, which disarms the Pi. Any
+  failure leaves the Pi armed with rescue as the default.
 - **Seed**: Raspberry Pi OS uses cloud-init (NoCloud, from the boot partition). `user-data`
   creates `FRESHPI_USER` (default `cm`, for configuration management) with the keys in
   `FRESHPI_KEYS_FILE` (key-only SSH, password locked, passwordless sudo), sets the hostname to
@@ -92,7 +93,7 @@ flowchart TD
 | `server/freshpi.py` | HTTP service (`serve`) + operator CLI; one file, standard library only |
 | `server/freshpi.service` | systemd unit (port 8090, all interfaces unless `FRESHPI_BIND` is set) |
 | `server/freshpi.conf.example` | settings; installed as `/etc/freshpi/freshpi.conf` |
-| `installer/` | initramfs `/init`, menu/blat/rescue script, udhcpc hook, mount helper |
+| `installer/` | initramfs `/init`, menu/blat/rescue script, udhcpc hook, mount, host key and disk split helpers |
 | `build/build.sh` | builds the payload (installer initramfs + Pi firmware, kernels, dtbs) |
 | `deploy.sh` | installs server, CLI and payload on the server host over SSH |
 | `examples/` | DHCP/DNS examples: dnsmasq, dnsmasq proxy DHCP, ISC Kea, OPNsense |
@@ -170,6 +171,29 @@ The serial is the last 8 hex digits of `/proc/device-tree/serial-number` on the 
 shown on the bootloader's HDMI diagnostic screen, and in the TFTP server's log as the folder
 name the Pi asks for.
 
+### A data partition beside the system
+
+A Pi with one disk can keep a data volume on it beside the system (for example an encrypted
+`/opt` set up by configuration management):
+
+```sh
+sudo freshpi add 1234abcd --model pi5 --target /dev/mmcblk0 --root-size 16G
+```
+
+After writing and checking the image, the blat grows the root partition (2) and its filesystem
+to that size (at least 4G) and makes the rest of the disk a third partition, with no
+filesystem: whatever uses it formats it. Raspberry Pi OS's own first-boot resize would grow the
+root over it, so the blat does that resize's other job itself (a new random disk id, in
+`cmdline.txt` and `/etc/fstab`) and takes `resize` off `cmdline.txt`. The disk needs an MBR
+table (the image's), at most 2 TiB, and at least 1 GiB left for the data partition; otherwise
+the blat fails before the seed is written.
+
+The data partition is not wiped: a Pi blatted again with the same `--root-size` gets its old
+data partition back, as a separate data disk would survive. A different size moves it, and
+what was there is gone. `freshpi list` shows the size in its `root` column, and the inventory
+as `freshpi_root_mib` (`null` for a Pi that keeps the whole disk). To change it, `remove` the
+Pi and `add` it again.
+
 ## Network
 
 FreshPi needs no Pi-specific DHCP option: the Pis only need to be told the FreshPi server's IP
@@ -207,8 +231,8 @@ sudo freshpi inventory --host pi5-1234abcd
 Groups: `pi3`, `pi5`, `armed`, `ready` (first boot reported since the last finished blat; a Pi
 armed again stays in it until the new blat is done) and `provisioning` (blat done, still waiting
 for the report). Host variables: `freshpi_serial`,
-`freshpi_model`, `freshpi_target`, `freshpi_armed`, `freshpi_last_blat`, `freshpi_ready`,
-`freshpi_address`, `freshpi_image`, `freshpi_blat_host_keys`; `ansible_host` is the hostname,
+`freshpi_model`, `freshpi_target`, `freshpi_root_mib`, `freshpi_armed`, `freshpi_last_blat`,
+`freshpi_ready`, `freshpi_address`, `freshpi_image`, `freshpi_blat_host_keys`; `ansible_host` is the hostname,
 or the reported address with `--use-address`, and `ansible_user` is the configuration-management
 account (`FRESHPI_USER`, `cm` by default) so `-u` is never needed. It only reads the
 (root-owned) state and is meant to be run as root on the server:

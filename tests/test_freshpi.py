@@ -26,7 +26,7 @@ SERIAL = "1234abcd"
 TARGET = "/dev/freshpi-test-nonexistent"
 MENU_TIMEOUT = 5  # the menu loop spins on stdin EOF; never let it run unbounded
 DISK_WRITERS = ("dd", "blkdiscard", "mkfs", "mkfs.vfat", "mkfs.ext4", "sfdisk", "wipefs",
-                "blockdev", "mount")
+                "blockdev", "mount", "freshpi-split")
 
 
 def free_port() -> int:
@@ -606,6 +606,27 @@ def test_inventory_lifecycle(server):
 def test_inventory_unknown_host_is_empty(server):
     srv = server()
     assert json.loads(cli(srv.env, "inventory", "--host", "pi5-ffffffff").stdout) == {}
+
+
+def test_root_size_reaches_installer_and_inventory(server):
+    srv = server()
+    r = cli(srv.env, "add", "deadbeef", "--model", "pi5", "--target", "/dev/mmcblk0",
+            "--root-size", "16G")
+    assert r.returncode == 0 and "root 16384 MiB" in r.stdout, r.stderr
+    assert json.loads(srv.request("/pi/deadbeef/state")[1])["root_mib"] == 16384
+    assert json.loads(srv.request(f"/pi/{SERIAL}/state")[1])["root_mib"] is None
+    hostvars = json.loads(cli(srv.env, "inventory").stdout)["_meta"]["hostvars"]
+    assert hostvars["pi5-deadbeef"]["freshpi_root_mib"] == 16384
+    assert hostvars[f"pi5-{SERIAL}"]["freshpi_root_mib"] is None
+    rows = {line.split()[0]: line for line in cli(srv.env, "list").stdout.splitlines()[1:]}
+    assert " 16G " in rows["deadbeef"] and " - " in rows[SERIAL]
+
+
+@pytest.mark.parametrize("size", ["16", "3G", "4095M", "1T", "-16G"])
+def test_add_rejects_bad_root_size(env, size):
+    r = cli(env, "add", SERIAL, "--model", "pi5", "--target", "/dev/mmcblk0", "--root-size", size)
+    assert r.returncode != 0 and "--root-size" in r.stderr
+    assert SERIAL not in cli(env, "list").stdout
 
 
 def test_freshpi_hostkeys_generates_and_masks(tmp_path):
