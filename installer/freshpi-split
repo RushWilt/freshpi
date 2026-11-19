@@ -20,6 +20,11 @@ p1="$TARGET${P}1"; p2="$TARGET${P}2"; p3="$TARGET${P}3"
 case "$ROOT_MIB" in '' | *[!0-9]*) die "root size must be a number of MiB, got '$ROOT_MIB'" ;; esac
 [ -b "$TARGET" ] || die "$TARGET is not a block device"
 
+# resize2fs refuses a filesystem whose last check predates its last mount, and e2fsck
+# records the check at the clock's time: at 1970 (a Pi has no RTC) the image's 2026 mount
+# always wins. The caller sets the clock first (freshpi-menu, from the server).
+[ "$(date +%s)" -ge 1577836800 ] || die "the clock is at $(date -u +%F), before 2020; set it first"
+
 # The table as the image wrote it: MBR, partitions 1 (boot) and 2 (root), nothing else.
 table=$(sfdisk -d "$TARGET") || die "cannot read the partition table of $TARGET"
 printf '%s\n' "$table" | grep -q '^label: dos$' || die "$TARGET has no MBR (dos) partition table"

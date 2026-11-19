@@ -53,6 +53,13 @@ part2() {
 # URL-encode stdin (jq @uri): base64 keys contain + / = which form decoding would mangle.
 urlenc() { jq -rsR '@uri'; }
 
+# The clock from the server's HTTP Date header: the Pi has no RTC and the installer runs
+# no NTP, so it boots at 1970.
+set_clock() {
+    d=$(curl -sI -m 10 "$SERVER/pi/$SERIAL/state" | sed -n 's/^[Dd]ate: *//p' | tr -d '\r')
+    [ -n "$d" ] && date -u -D '%a, %d %b %Y %H:%M:%S GMT' -s "$d" >/dev/null
+}
+
 fail_blat() {
     say ""
     log "BLAT FAILED: $*"
@@ -94,6 +101,7 @@ blat() {
 
     root_mib=$(st '.root_mib // empty')
     if [ -n "$root_mib" ]; then
+        set_clock || fail_blat "cannot set the clock from the server (needed to resize the root)"
         log "Splitting $target: root $root_mib MiB, the rest a data partition"
         out=$(freshpi-split "$target" "$root_mib" 2>/tmp/split.err) ||
             fail_blat "split failed: $(tail -n 1 /tmp/split.err)"

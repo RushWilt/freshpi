@@ -12,8 +12,9 @@ All notable changes to FreshPi are documented in this file. The format is based 
   and makes the rest of the target a third partition, unformatted, for a data volume beside the
   system on a one-disk Pi. Pi OS's first-boot resize is replaced (new disk id, `resize` taken
   off `cmdline.txt`). The size is in the installer's state, `freshpi list` (`root` column) and
-  the inventory (`freshpi_root_mib`). Needs a rebuilt and deployed payload
-  (`installer/freshpi-split`).
+  the inventory (`freshpi_root_mib`). Before splitting, the installer sets its clock from the
+  server's HTTP `Date` header: at 1970 (no RTC, no NTP) `resize2fs` refuses the image's root.
+  Needs a rebuilt and deployed payload (`installer/freshpi-split`).
 
 ## [0.0.2] - 2026-11-04
 
